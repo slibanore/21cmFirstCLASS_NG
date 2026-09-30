@@ -11,4 +11,4 @@ lim/*
 High*
 watershed*
 *.pkl
-fcoll*
+.gitignore
