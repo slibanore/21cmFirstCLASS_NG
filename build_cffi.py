@@ -64,7 +64,8 @@ ffi.set_source(
     ),
     include_dirs=include_dirs,
     library_dirs=library_dirs,
-    # SarahLibanore : double precision fftw
+    # Double-precision FFTW: this fork uses double throughout, so it links
+    # fftw3 rather than the single-precision fftw3f used upstream.
     libraries=["m", "gsl", "gslcblas", #"fftw3f","fftw3f_omp", 
                "fftw3_omp", "fftw3"],
     extra_compile_args=extra_compile_args,
