@@ -104,11 +104,25 @@ void adj_complex_conj(fftw_complex *HIRES_box, struct UserParams *user_params, s
     }
 }
 
-// -------------------------------------------------------------
-// -------------------------------------------------------------
-
-// SarahLibanore:
-// Padding function (Orszag 3/2 rule) for de-aliasing
+/* ---------------------------------------------------------------------------
+ * De-aliasing helpers for the non-Gaussian initial conditions.
+ *
+ * Building a locally non-Gaussian potential means squaring the Gaussian
+ * potential in real space. A field band-limited at k_Nyquist acquires power out
+ * to 2 k_Nyquist when squared, and on a periodic grid that excess folds back
+ * onto the resolved modes as aliasing. The standard cure is Orszag's 3/2 rule:
+ * zero-pad the field to a grid 3/2 larger before the product, then discard the
+ * modes above the original Nyquist afterwards.
+ *
+ * pad_box_3over2 copies the D^3 Fourier box into the corner-wrapped layout of
+ * the larger D_pad^3 box, zeroing everything else. truncate_box_3over2 is its
+ * inverse. The padding factor is user_params.EXTRA_DIM_FNL, which should be
+ * 1.5 for exact de-aliasing of a quadratic nonlinearity; smaller values trade
+ * accuracy for memory, and 1.0 disables de-aliasing entirely.
+ *
+ * Both routines assume the half-complex r2c layout, hence the (MID_pad + 1)
+ * stride on the last axis.
+ * ------------------------------------------------------------------------- */
 void pad_box_3over2(fftw_complex *large_box, fftw_complex *small_box, int D_pad, int MID_pad) {
 
     memset(large_box, 0, sizeof(fftw_complex) * D_pad * D_pad * (MID_pad + 1));
@@ -132,8 +146,7 @@ void pad_box_3over2(fftw_complex *large_box, fftw_complex *small_box, int D_pad,
     }
 }
 
-// SarahLibanore:
-// Truncating function (Orszag 3/2 rule) for de-aliasing
+/* Inverse of pad_box_3over2: keep only the modes below the original Nyquist. */
 void truncate_box_3over2(fftw_complex *cutmodes_box,
                          fftw_complex *allmodes_box,
                          int D_pad, int MID_pad)
@@ -188,9 +201,12 @@ int ComputeInitialConditions(
     double p_vcb, vcb_i;
     // JordanFlitter: new variables for SDM
     double p_SDM, delta_SDM_i;
-    // SarahLibanore: quantities needed for NG case
-    double avg_pot2;
-    // SarahLibanore: dealiasing
+    /* Mean of the squared potential, subtracted when forming Phi^2 - <Phi^2>.
+     * Must start at zero: it is the target of an OpenMP + reduction, which
+     * combines the per-thread partial sums with the variable's initial value. */
+    double avg_pot2 = 0.;
+
+    /* De-aliasing grid for the non-Gaussian initial conditions (Orszag 3/2). */
     int D_pad = round(user_params_ps->DIM * user_params_ps->EXTRA_DIM_FNL);
     int MID_pad = round(D_pad/2);
     inline unsigned long long R_pad_INDEX(int x, int y, int z) {
@@ -271,11 +287,27 @@ int ComputeInitialConditions(
     fftw_complex *HIRES_box = (fftw_complex *) fftw_malloc(sizeof(fftw_complex)*KSPACE_NUM_PIXELS);
     fftw_complex *HIRES_box_saved = (fftw_complex *) fftw_malloc(sizeof(fftw_complex)*KSPACE_NUM_PIXELS);
 
-    // SarahLibanore: dealiasing
-    // Allocate padded Fourier box
-    fftw_complex *pad_k = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * D_pad * D_pad * (MID_pad + 1));
-    double *pad_r = (double*) fftw_malloc(sizeof(double) * D_pad*D_pad*D_pad);
-    fftw_complex *tmp_k = (fftw_complex*) fftw_malloc(sizeof(fftw_complex)*KSPACE_NUM_PIXELS);
+    /* Padded boxes used only while building non-Gaussian initial conditions.
+     * These are large: at the default DIM and EXTRA_DIM_FNL = 1.5 they come to
+     * roughly 12 GiB together, so they are allocated only when NON_GAUSS_IC is
+     * actually on and left NULL otherwise. */
+    fftw_complex *pad_k = NULL;
+    double       *pad_r = NULL;
+    fftw_complex *tmp_k = NULL;
+
+    if (user_params->NON_GAUSS_IC) {
+        pad_k = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * D_pad * D_pad * (MID_pad + 1));
+        pad_r = (double*)       fftw_malloc(sizeof(double) * D_pad * D_pad * D_pad);
+        tmp_k = (fftw_complex*) fftw_malloc(sizeof(fftw_complex) * KSPACE_NUM_PIXELS);
+
+        if (pad_k == NULL || pad_r == NULL || tmp_k == NULL) {
+            LOG_ERROR("Could not allocate the de-aliasing boxes for NON_GAUSS_IC "
+                      "(DIM=%d, EXTRA_DIM_FNL=%.2f, padded grid %d^3). "
+                      "Reduce EXTRA_DIM_FNL or DIM.",
+                      user_params_ps->DIM, user_params_ps->EXTRA_DIM_FNL, D_pad);
+            Throw(MemoryAllocError);
+        }
+    }
 
 
     // allocate array for the k-space and real-space boxes for vcb
@@ -337,7 +369,10 @@ int ComputeInitialConditions(
                         b = gsl_ran_ugaussian(rng);
                         }
 
-                    // SarahLibanore: non gaussian potential will determine the density in the NG case
+                    /* With non-Gaussian initial conditions we draw the
+                     * primordial potential rather than the density; the
+                     * density is derived from it further down, after the
+                     * local quadratic term has been applied. */
                     if (user_params->NON_GAUSS_IC){
                         p = power_in_k_potential(k_mag);
                         HIRES_box[C_INDEX(n_x, n_y, n_z)] = sqrt(VOLUME*p/2.0) * (a + b*I);
@@ -352,13 +387,28 @@ int ComputeInitialConditions(
     }
     LOG_DEBUG("Drawn random fields.");
 
-    // SarahLibanore transform potential to density and introduce non gaussianity
+    /* ---------------------------------------------------------------------
+     * Apply the local non-Gaussian ansatz and convert potential to density.
+     *
+     *     Phi = Phi_G + f_NL * (Phi_G^2 - <Phi_G^2>)
+     *
+     * The square is a real-space operation, so the sequence is: enforce
+     * Hermitian symmetry, pad, inverse FFT to real space, square and subtract
+     * the mean, forward FFT, truncate back to the original resolution, add
+     * f_NL times the result to the Gaussian box, and only then multiply by the
+     * transfer function.
+     *
+     * The ordering is not a matter of taste. Squaring does not commute with a
+     * scale-dependent transfer function, so applying the ansatz after the
+     * transfer would produce a different and incorrect bispectrum. The local
+     * ansatz belongs to the primordial field: transfer last, not first.
+     * ------------------------------------------------------------------- */
     if (user_params->NON_GAUSS_IC){
 
-    // we created the gaussian potential box in FT
+        /* The Gaussian potential box currently lives in Fourier space. */
         adj_complex_conj(HIRES_box,user_params,cosmo_params);
-        
-        // Padding (Orszag)
+
+        /* Zero-pad to the de-aliasing grid before the real-space product. */
         pad_box_3over2(pad_k, HIRES_box, D_pad, MID_pad);
 
         // Create the FFT plan to go to real space
@@ -376,9 +426,9 @@ int ComputeInitialConditions(
 
         fftw_execute_dft_c2r(plan_inverse, pad_k, pad_r);
 
-        // Compute mean(phi²) and replace φ with (φ² - <φ²>)
+        /* FFTW's transforms are unnormalised, so undo the N factor first. */
         size_t Ntot = (size_t)D_pad * D_pad * D_pad;
-        #pragma omp parallel for collapse(3) //!!!!!!!!!!!!
+        #pragma omp parallel for collapse(3)
             for (int i = 0; i < D_pad; i++) {
                 for (int j = 0; j < D_pad; j++) {
                     for (int k = 0; k < D_pad; k++) {
@@ -387,40 +437,41 @@ int ComputeInitialConditions(
                 }
             }
         
-        // printf("potential=%e\n",pad_r[R_pad_INDEX(0,0,0)]);
-        
-        #pragma omp parallel for reduction(+:avg_pot2) //!!!!!!!!!!!!
+        /* <Phi^2> over the padded box. Measured rather than taken from theory,
+         * so that the subtraction removes exactly the mean this realisation
+         * has; it therefore depends on the grid resolution. */
+        #pragma omp parallel for reduction(+:avg_pot2)
         for (size_t i = 0; i < Ntot; i++) {
             avg_pot2 += pad_r[i] * pad_r[i];
         }
         avg_pot2 /= (double)Ntot;
 
-        // #pragma omp parallel for
+        #pragma omp parallel for
         for (size_t i = 0; i < Ntot; i++) {
             double v = pad_r[i];
             pad_r[i] = v*v - avg_pot2;
         }
-        // printf("delta phi^2=%e\n",pad_r[R_pad_INDEX(0,0,0)]);
 
-        // FFT back to k-space
+        /* Back to Fourier space. */
         fftw_plan plan_fwd = fftw_plan_dft_r2c_3d(D_pad, D_pad, D_pad, pad_r, pad_k, FFTW_ESTIMATE);
         fftw_execute(plan_fwd);
 
-        // Truncate back to original resolution
-        truncate_box_3over2(tmp_k, pad_k, D_pad, MID_pad);  
-        
-        // φ_NG = φ + f_NL * tmp_k (in Fourier space)
+        /* Discard the modes above the original Nyquist (the de-aliasing step). */
+        truncate_box_3over2(tmp_k, pad_k, D_pad, MID_pad);
+
+        /* Phi = Phi_G + f_NL * (Phi_G^2 - <Phi_G^2>), done in Fourier space. */
         size_t Npix_k = (size_t)D * D * (MIDDLE + 1);
         double fnl = cosmo_params_ps->F_NL;
 
-        #pragma omp parallel for  //!!!!!!!!!!!!
+        #pragma omp parallel for
         for (size_t i = 0; i < Npix_k; i++) {
             HIRES_box[i] += fnl * tmp_k[i];
         }
 
-        adj_complex_conj(HIRES_box,user_params,cosmo_params)   ;  
+        /* Restore Hermitian symmetry after the nonlinear step. */
+        adj_complex_conj(HIRES_box,user_params,cosmo_params);
 
-            // convert potential to density in FFT space with NG contribution
+        /* Convert the non-Gaussian potential into a density contrast. */
         #pragma omp parallel num_threads(user_params->N_THREADS) shared(HIRES_box,r)
         {
 
@@ -452,9 +503,19 @@ int ComputeInitialConditions(
                         k_sq = k_x*k_x + k_y*k_y + k_z*k_z;
                         k_mag = sqrt(k_sq);
 
+                        /* delta(k) = T_zeta(k) * (5/3) * k^2 * Phi(k).
+                         *
+                         * CLASS returns the transfer function from the primordial
+                         * curvature perturbation zeta, while the box holds the
+                         * potential Phi = (3/5) zeta, so the 5/3 converts between
+                         * them. It cancels exactly against the (3/5)^2 carried by
+                         * power_in_k_potential(), leaving the physical result
+                         * independent of the convention; what the convention does
+                         * fix is the meaning of F_NL, which is the CMB one here.
+                         * The k^2 is the Poisson factor. */
                         if (k_mag == 0.){pot_to_delta = 0.;}
                         else
-                        {pot_to_delta = TF_CLASS(k_mag,1,0)*(5./3.)*k_sq ;} // the potential transfer function (instead of 5/3) is to go from potential to primordial curvature, that's how the transfer function in CLASS is defined
+                        {pot_to_delta = TF_CLASS(k_mag,1,0)*(5./3.)*k_sq ;}
                         if(user_params_ps->USE_RELATIVE_VELOCITIES && !user_params_ps->EVOLVE_MATTER) { //jbm:Add average relvel suppression
                             Cv = sqrt(1.0 - global_params.A_VCB_PM*exp( -pow(log(k_mag/global_params.KP_VCB_PM),2.0)/(2.0*global_params.SIGMAK_VCB_PM*global_params.SIGMAK_VCB_PM)));} //for v=vrms}
                         else {
@@ -465,7 +526,7 @@ int ComputeInitialConditions(
     }
 
     else{ 
-        // SarahLibanore : in the NG case, no need of doing the cc separately
+        /* Hermitian symmetry was already enforced above for the NG branch. */
         // *****  Adjust the complex conjugate relations for a real array  ***** //
         adj_complex_conj(HIRES_box,user_params,cosmo_params);
     }
@@ -1312,6 +1373,7 @@ if(user_params->SCATTERING_DM && user_params->USE_SDM_FLUCTS){
     fftw_free(HIRES_box);
     fftw_free(HIRES_box_saved);
 
+    /* fftw_free on NULL is a no-op, so this is safe when NON_GAUSS_IC is off. */
     fftw_free(pad_k);
     fftw_free(pad_r);
     fftw_free(tmp_k);

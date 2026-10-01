@@ -107,7 +107,7 @@ struct GlobalParams{
     double LOG_V_chi_b[70];
     double LOG_K_ARR_FOR_TRANSFERS[149];
     double T_M0_TRANSFER[149];
-    double T_ZETA_TRANSFER[149]; // SarahLibanore, fnl
+    double T_ZETA_TRANSFER[149]; // zeta -> matter density transfer function at z=0, for non-Gaussian ICs
     double T_VCB_KIN_TRANSFER[149];
     double T_V_CHI_B_ZHIGH_TRANSFER[149];
     double LOG_K_ARR_FOR_SDGF[300];
@@ -117,7 +117,9 @@ struct GlobalParams{
     double LOG_M_ARR[300];
     double Z_ARRAY_FOR_SIGMA[101];
     double SIGMA_MZ[300*101];
-    // SarahLibanore : three point function at z = 0 used for NG case
+    // Three-point functions of the smoothed density field at z=0, and their mass
+    // derivatives, used by the non-Gaussian collapsed fraction. Flattened 300x300
+    // grids over (M_n, M_m); see three_point_interpolations() in ps.c.
     double THREEPOINT_MnMm[300*300]; // the size is set by log M x log M
     double THREEPOINT_DER_Mn3[300*300];
     double THREEPOINT_DER_MmMn2[300*300];

@@ -20,8 +20,8 @@ struct CosmoParams{
     double f_chi; // JordanFlitter: added SDM fraction (this is actually -log10(f_chi))
     double sigma_SDM; // JordanFlitter: added SDM cross section prefactor (this is actually -log10(sigma/cm^2))
     double SDM_INDEX; // JordanFlitter: added SDM cross section index
-    double F_NL; // SarahLibanore: local non gaussianity
-    double KCUT_FNL; // SarahLibanore: minimum scale where non Gaussianity kicks in (2009.01245) 
+    double F_NL;     // Local primordial non-Gaussianity, CMB (Planck) convention; 0 = Gaussian
+    double KCUT_FNL; // Lower k cut-off [1/Mpc] on every leg of the bispectrum (arXiv:2009.01245)
 
 };
 
@@ -30,7 +30,7 @@ struct UserParams{
     // Parameters taken from INIT_PARAMS.H
     int HII_DIM;
     int DIM;
-    double EXTRA_DIM_FNL; // SarahLibanore: introduced for NG
+    double EXTRA_DIM_FNL; // Grid padding factor for de-aliasing the NG potential (Orszag 3/2 rule)
     double BOX_LEN;
     bool USE_FFTW_WISDOM;
     int HMF;
@@ -66,15 +66,19 @@ struct UserParams{
     bool EVALUATE_TAU_REIO; // JordanFlitter: added flag to evaluate tau_reio from the simulation
     bool EVOLVE_MATTER; // JordanFlitter: added flag to properly evolve the CDM density field (and the total matter field)
     bool LINEAR_DELTA_IN_EPS; // JordanFlitter: added flag to use delta_m from linear theory in the EPS formalism
-    bool NON_GAUSS_IC; // SarahLibanore: flag to use fNL in initial conditions
-    bool NON_GAUSS_FCOLL_COND; // SarahLibanore: flag to use fNL in collapsed fraction
-    bool NON_GAUSS_FCOLL_UNCOND; // SarahLibanore: flag to use fNL in collapsed fraction
-    bool NG_MODEL_APPROX; // SarahLibanore: if True use Lidz approx (1304.8049), otherwise D'Alosio (1206.3305)
-    double FORCE_MMAX; // SarahLibanore: high mass cut in the intrgrals, to prevent inf in the fnl case
-    bool WRITE_CGF_DIAG; // SarahLibanore: flag for debugging fnl case
-    double MAX_EPSILON_NG; // SarahLibanore: cap fnl correction when III order > II order
-    bool USE_LD_cond_hmf; // SarahLibanore: in dNdm_conditional, if True use Lidz implementation (1304.8049), otherwise saddlepoint 
-    bool USE_EDG_uncond_hmf; // SarahLibanore: in dNion_General, if True use Edgeworth implementation (2009.01245), otherwise saddlepoint
+    // --- Local primordial non-Gaussianity. See UserParams in inputs.py for details. ---
+    // Where the non-Gaussianity is applied:
+    bool NON_GAUSS_IC;            // non-Gaussian initial density field
+    bool NON_GAUSS_FCOLL_COND;    // conditional HMF (dNdM_conditional)
+    bool NON_GAUSS_FCOLL_UNCOND;  // unconditional HMF (dNion_General)
+    // Which approximation is used where it is applied:
+    bool USE_LD_cond_hmf;         // conditional:   Lidz/D'Aloisio if true, else saddlepoint
+    bool NG_MODEL_APPROX;         //   if Lidz/D'Aloisio: arXiv:1304.8049 if true, else arXiv:1206.3305
+    bool USE_EDG_uncond_hmf;      // unconditional: Edgeworth (arXiv:2009.01245) if true, else saddlepoint
+    // Numerical controls:
+    double FORCE_MMAX;            // log10(M_max/Msun) cap on the mass integrals; 0 = use M_MAX_INTEGRAL
+    double MAX_EPSILON_NG;        // saddlepoint divergence guard; see dNion_General in ps.c
+    bool WRITE_CGF_DIAG;          // dump per-evaluation diagnostics to files/ (slow, debugging only)
 };
 
 struct AstroParams{
@@ -131,7 +135,7 @@ struct InitialConditions{
     double *hires_density, *hires_vx, *hires_vy, *hires_vz, *hires_vx_2LPT, *hires_vy_2LPT, *hires_vz_2LPT; //cw addition
     double *lowres_vcb;
     double *lowres_xe_zhigh, *lowres_Tk_zhigh, *lowres_Tchi_zhigh, *lowres_V_chi_b_zhigh; // JordanFlitter: added new SDM boxes to the InitialConditions structure
-    double *hires_potential; // SarahLibanore added box for NG
+    double *hires_potential; // Primordial potential box, used when NON_GAUSS_IC is set
 };
 
 struct PerturbedField{

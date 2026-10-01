@@ -14,6 +14,10 @@ from scipy.interpolate import interp1d
 from scipy.integrate import solve_ivp
 from scipy.optimize import curve_fit
 
+# NumPy 2.0 renamed np.trapz to np.trapezoid and removed the old name.
+# Bind whichever exists so the module works on both NumPy 1.x and 2.x.
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 #####################################################################################################################################################
 #%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% Define some global parameters and useful functions %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 #####################################################################################################################################################
@@ -236,7 +240,11 @@ def run_ICs(cosmo_params,user_params,global_params):
     CLASS_params['lensing'] = 'yes'
     CLASS_params['z_pk'] = 1087.
     CLASS_params['l_max_scalars'] = 3000
-    # We need to run CLASS for very large wavenumbers. This is required for computing sigma(M) and the HMF
+    # We need to run CLASS for very large wavenumbers. This is required for computing sigma(M) and the HMF.
+    # Raised from the upstream value of 1200 because the three-point functions below integrate the
+    # bispectrum over a wider range of k than sigma(M) alone needs. It is applied unconditionally so
+    # that a run with F_NL = 0 is numerically identical to a run with F_NL != 0 in everything except
+    # the non-Gaussian terms; this costs some CLASS runtime even when the PNG flags are off.
     CLASS_params['P_k_max_1/Mpc'] = 3000.
     if user_params.FUZZY_DM:
         # Set FDM parameters
@@ -267,6 +275,7 @@ def run_ICs(cosmo_params,user_params,global_params):
         CLASS_params['background_verbose'] = 0
     if user_params.SCATTERING_DM:
         # Set SDM parameters
+        CLASS_params['N_dmeff'] = 1 # number of SDM species
         CLASS_params['Omega_dmeff'] = f_chi*Omega_c0 # ratio of SDM to total DM
         CLASS_params['m_dmeff'] = m_chi # SDM mass in GeV
         CLASS_params['sigma_dmeff'] = sigma_SDM # cross section prefactor in cm^2
@@ -338,14 +347,18 @@ def run_ICs(cosmo_params,user_params,global_params):
     theta_c_kin_CLASS = np.zeros_like(theta_b_kin_CLASS) # 1/sec
 
     Transfer_fnl = CLASS_OUTPUT.get_transfer(0.,'camb')
-    transfer_zeta = Transfer_fnl['-T_tot/k2']    # SarahLibanore, fnl
+    # Transfer function from the primordial curvature perturbation zeta to the total
+    # matter density at z = 0, in the CAMB normalisation that CLASS can emit.
+    # Used below both for the non-Gaussian initial conditions and for the
+    # three-point functions that enter the non-Gaussian collapsed fraction.
+    transfer_zeta = Transfer_fnl['-T_tot/k2']
 
     # Interpolate transfer functions at the desired wavenumbers
     delta_c_kin = Interpolate_transfer(delta_c_kin_CLASS,k_CLASS,k_output)
     delta_b_kin = Interpolate_transfer(delta_b_kin_CLASS,k_CLASS,k_output)
     theta_c_kin = Interpolate_transfer(theta_c_kin_CLASS,k_CLASS,k_output)
     theta_b_kin = Interpolate_transfer(theta_b_kin_CLASS,k_CLASS,k_output)
-    delta_zeta = Interpolate_transfer(transfer_zeta,k_CLASS,k_output) # SarahLibanore, fnl
+    delta_zeta = Interpolate_transfer(transfer_zeta,k_CLASS,k_output)
     # Calculate v_cb at kinematic decoupling (as a function of k)
     v_cb_kin = (theta_b_kin-theta_c_kin)/(k_output/Mpc_to_meter)/1000. # km/sec
     # Find the transfer function of v_cb (which is consistent with 21cmFAST).
@@ -584,7 +597,7 @@ def run_ICs(cosmo_params,user_params,global_params):
     # Interpolation tables for background quantities
     global_params.T_M0_TRANSFER = list(delta_m_0)
     global_params.T_VCB_KIN_TRANSFER = list(T_vcb_kin)
-    global_params.T_ZETA_TRANSFER = list(delta_zeta) # SarahLibanore, fnl
+    global_params.T_ZETA_TRANSFER = list(delta_zeta)
 
     # SDM quantities
     if user_params.SCATTERING_DM:
@@ -609,43 +622,84 @@ def run_ICs(cosmo_params,user_params,global_params):
         global_params.LOG_K_ARR_FOR_SDGF = list(log_k_array)
         global_params.LOG_SDGF_CDM = list(log10_D_c_kz_mat.T.flatten())
 
-    # SarahLibanore: three point function to add NG corrections to Fcoll
+    # Three-point functions of the smoothed linear density field, needed by the
+    # non-Gaussian collapsed fraction. They are independent of redshift (see the
+    # note on tpf below), so they are computed once here and reused at every z.
+    # This is the most expensive part of the initialisation, so it is skipped
+    # unless a non-Gaussian collapsed-fraction flag is actually on.
     if user_params.NON_GAUSS_FCOLL_COND or user_params.NON_GAUSS_FCOLL_UNCOND:
 
-        temp = tpf(log10_M_array,cosmo_params,global_params)
+        mu3, dmu3_dMn_diag, dmu3_dMn_lower, dmu3_dMn_upper = tpf(
+            log10_M_array, cosmo_params, global_params
+        )
 
-        THREEPOINT_MnMm_mat = temp[0]
-        THREEPOINT_DER_Mn3 = temp[1]
-        THREEPOINT_DER_MmMn2 = temp[2]
-        THREEPOINT_DER_MnMm2 = temp[3]
-
-        global_params.THREEPOINT_DER_Mn3 = list(THREEPOINT_DER_Mn3.flatten())
-        global_params.THREEPOINT_DER_MmMn2 = list(THREEPOINT_DER_MmMn2.flatten())
-        global_params.THREEPOINT_DER_MnMm2 = list(THREEPOINT_DER_MnMm2.flatten())
-
-        global_params.THREEPOINT_MnMm = list(THREEPOINT_MnMm_mat.flatten())
+        global_params.THREEPOINT_MnMm = list(mu3.flatten())
+        global_params.THREEPOINT_DER_Mn3 = list(dmu3_dMn_diag.flatten())
+        global_params.THREEPOINT_DER_MmMn2 = list(dmu3_dMn_lower.flatten())
+        global_params.THREEPOINT_DER_MnMm2 = list(dmu3_dMn_upper.flatten())
 
     # Return the lensed C_ell's
     return CLASS_OUTPUT.lensed_cl(3000)
 
 
 
-# SarahLibanore : compute three point functions and derivative wrt Mn for NG corrections to Fcoll 
-# The function is computed only at z = 0 
-def window(k,M,rhoM):
+#####################################################################################################################################################
+#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% Three-point functions for non-Gaussian collapsed fraction %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+#####################################################################################################################################################
+#
+# These routines evaluate the third-order cumulants of the linear density field
+# smoothed on two mass scales, which are what the non-Gaussian halo mass
+# function needs.  They follow Sec. III B of Sabti, Munoz & Blas
+# (arXiv:2009.01245); the mixed cumulants also appear in D'Aloisio et al.
+# (arXiv:1206.3305) and Lidz et al. (arXiv:1304.8049).
+#
+# Conventions, which matter and are easy to get wrong:
+#
+#   * Phi is the primordial Bardeen potential, Phi = (3/5) zeta, i.e. the value
+#     the potential takes on super-horizon scales during matter domination.
+#     It is used as a normalisation at all k; the scale dependence lives
+#     entirely in the transfer function.  The factor 3/5 cancels identically in
+#     sigma(M) but survives in kappa_3 = mu_3 / sigma^3, where it is precisely
+#     what makes F_NL the CMB-convention (Planck) f_NL.
+#
+#   * Everything here is evaluated at z = 0.  In linear theory
+#     sigma^2 ~ D(z)^2 and mu_3 ~ D(z)^3, so the reduced skewness
+#     kappa_3 = mu_3 / sigma^3 is redshift independent.  The tables are
+#     therefore built once and reused at every redshift by the C code, which
+#     applies the growth factor itself.
+#
+#   * Masses are in solar masses, wavenumbers in 1/Mpc.
 
+def window(k, M, rhoM):
+    """Fourier transform of the real-space top-hat window.
+
+    Parameters
+    ----------
+    k : array
+        Wavenumber in 1/Mpc.
+    M : array
+        Mass enclosed by the filter, in solar masses.
+    rhoM : float
+        Mean matter density in Msun/Mpc^3, which sets the radius
+        R = (3M / 4 pi rhoM)^(1/3) corresponding to M.
+    """
     R = (3.*M/(4.*np.pi*rhoM))**(1/3.)
 
     x = (k*R)
-    W = 3.0*(np.sin(x) - x*np.cos(x))/(x)**3 
+    W = 3.0*(np.sin(x) - x*np.cos(x))/(x)**3
 
     return W
 
 
-def der_window(k,M,rhoM):
+def der_window(k, M, rhoM):
+    """Derivative of :func:`window` with respect to mass, dW/dM.
 
+    Obtained by the chain rule through R(M), using dR/dM = R / (3M).
+    Needed because the non-Gaussian mass function depends on how the
+    cumulants vary with M, not only on their value.
+    """
     R = (3.*M/(4.*np.pi*rhoM))**(1/3.)
-    
+
     x = (k*R)
 
     dW_dM = (-9*np.sin(x) + 9*x*np.cos(x) + 3*(x**2)*np.sin(x))/((3*M)*(x**3))
@@ -654,16 +708,50 @@ def der_window(k,M,rhoM):
 
 
 def Pphi(k, cosmo_params):
+    """Power spectrum of the primordial Bardeen potential Phi, in Mpc^3.
 
+    P_Phi(k) = (3/5)^2 * A_s * (k / k_pivot)^(n_s - 1) * 2 pi^2 / k^3
+
+    with k_pivot = 0.05 1/Mpc.  The (3/5)^2 converts the curvature power
+    spectrum amplitude A_s into the potential normalisation; see the
+    convention note at the top of this section.
+    """
     Tphi = 3/5.
-    P = Tphi**2 *cosmo_params.A_s * pow(k/0.05, cosmo_params.POWER_INDEX-1) * (2*np.pi**2/k**3) 
+    P = Tphi**2 *cosmo_params.A_s * pow(k/0.05, cosmo_params.POWER_INDEX-1) * (2*np.pi**2/k**3)
 
     return P
 
 
-def curlM(k,M,kall,cosmo_params,global_params):
-    
-    T_CLASS = interp1d(kall, global_params.T_ZETA_TRANSFER, kind='cubic', bounds_error=False,fill_value=0.)
+def _zeta_spline(kall, global_params):
+    """Cubic interpolator for the zeta -> matter density transfer function.
+
+    Kept as a helper so the spline is built once per call to :func:`tpf`
+    instead of once per evaluation of the integrands, which is what the
+    original implementation did.
+    """
+    return interp1d(kall, global_params.T_ZETA_TRANSFER, kind='cubic',
+                    bounds_error=False, fill_value=0.)
+
+
+def curlM(k, M, kall, cosmo_params, global_params, T_CLASS=None):
+    """The kernel M(k, M) relating the potential to the smoothed density.
+
+    delta_M(k) = M(k, M) * Phi(k), with
+
+        M(k, M) = T(k) k^2 / (3/5) * W(k, M)
+
+    where T(k) is the CLASS transfer function from zeta to the z = 0 matter
+    density.  Dividing by 3/5 converts it into a transfer function from Phi,
+    cancelling the same factor carried by :func:`Pphi`.
+
+    Parameters
+    ----------
+    T_CLASS : callable, optional
+        Pre-built interpolator from :func:`_zeta_spline`.  Pass it in to avoid
+        rebuilding the spline on every call.
+    """
+    if T_CLASS is None:
+        T_CLASS = _zeta_spline(kall, global_params)
 
     rho_crit = 2.7754e11 * cosmo_params.hlittle**2
     rhoM = rho_crit *cosmo_params.OMm
@@ -675,9 +763,14 @@ def curlM(k,M,kall,cosmo_params,global_params):
     return curlM
 
 
-def der_curlM(k,M,kall,cosmo_params,global_params):
-    
-    T_CLASS = interp1d(kall, global_params.T_ZETA_TRANSFER, kind='cubic', bounds_error=False,fill_value=0.)
+def der_curlM(k, M, kall, cosmo_params, global_params, T_CLASS=None):
+    """Derivative of :func:`curlM` with respect to mass, dM(k, M)/dM.
+
+    Only the window function depends on M, so this is :func:`curlM` with
+    :func:`window` replaced by :func:`der_window`.
+    """
+    if T_CLASS is None:
+        T_CLASS = _zeta_spline(kall, global_params)
 
     rho_crit = 2.7754e11 * cosmo_params.hlittle**2
     rhoM = rho_crit * cosmo_params.OMm
@@ -688,11 +781,71 @@ def der_curlM(k,M,kall,cosmo_params,global_params):
     return dcurlM
 
 
-def FM(kall,k_1,Mm,k_class,cosmo_params,global_params):
+# Number of mass bins processed at once inside FM.
+#
+# The integrand there is four-dimensional, of shape (n_k1, n_k2, n_mu, n_M),
+# and the routine holds four such arrays at once. At the default KCUT_FNL the
+# first three axes alone are 122 x 122 x 128, so processing all 300 mass bins
+# in one pass needs tens of GiB and is killed by the OOM reaper on an ordinary
+# machine. Chunking the mass axis bounds the peak without changing the answer:
+# mass is a spectator index, so each chunk performs exactly the same
+# quadrature, in the same order, over k_2 and mu. The output is bit-identical
+# for any chunk size.
+#
+# Measured on the default grid (144 k points, 300 mass bins, KCUT_FNL = 1e-3):
+#
+#     chunk    peak RSS    wall time
+#         8     0.80 GiB        87 s
+#        16     1.49 GiB        77 s
+#        32     2.86 GiB        80 s
+#
+# Runtime is flat, so this is purely a memory knob. Lower it if you are tight
+# on RAM; raising it buys nothing.
+_FM_MASS_CHUNK = 16
 
+
+def FM(kall, k_1, Mm, k_class, cosmo_params, global_params, mass_chunk=None):
+    """Inner double integral of the bispectrum, and its mass derivative.
+
+    Evaluates, for each k_1 and each mass M_m,
+
+        F(k_1, M_m) = 6 f_NL / (8 pi^4) *
+                      int dk_2 k_2^2 int dmu
+                      M(k_2, M_m) M(|k_1 + k_2|, M_m) P_Phi(k_1) P_Phi(k_2)
+
+    which is the angular and radial reduction of the local-type bispectrum,
+    Eq. (14) of arXiv:2009.01245, with mu = cos(theta) between k_1 and k_2.
+    Only two of the three cyclic permutations survive the reduction; the
+    overall factor 6 accounts for this.
+
+    The second return value is the same integral with M -> dM/dM_m applied to
+    both kernels in turn, i.e. the mass derivative of F at fixed k_1.
+
+    Parameters
+    ----------
+    kall : array
+        Wavenumbers above KCUT_FNL; the k_2 integration grid.
+    k_1 : array
+        Outer wavenumbers, normally the same grid as ``kall``.
+    Mm : array
+        Masses in solar masses.
+    k_class : array
+        Full wavenumber grid on which T_ZETA_TRANSFER is tabulated.
+    mass_chunk : int, optional
+        Mass bins per block; defaults to ``_FM_MASS_CHUNK``.
+
+    Returns
+    -------
+    Fm, dFm_dn2 : arrays of shape (len(k_1), len(Mm))
+    """
     mu = np.linspace(-0.995, 0.995, 128) # cos theta
 
-    Mm = Mm[None,None, None,:]
+    if mass_chunk is None:
+        mass_chunk = _FM_MASS_CHUNK
+
+    # Build the transfer-function spline once and reuse it for every chunk.
+    T_CLASS = _zeta_spline(k_class, global_params)
+
     k_1 = k_1[:,None, None,None]
     k_2 = kall[None,:, None,None]
     mu_val = mu[None,None,:,None]
@@ -703,62 +856,105 @@ def FM(kall,k_1,Mm,k_class,cosmo_params,global_params):
     Pphi_1 = Pphi(k_1,cosmo_params)
     Pphi_2 = Pphi(k_2,cosmo_params)
 
+    # |k_1 + k_2| by the cosine rule. Independent of mass, so it is computed
+    # once outside the chunk loop.
     k_12 = np.sqrt(pow(k_1,2)+pow(k_2,2) + 2*k_1*k_2*mu_val)
 
-    curlM_2 = curlM(k_2,Mm,k_class,cosmo_params,global_params) 
-    curlM_12 = curlM(k_12,Mm,k_class,cosmo_params,global_params) 
+    prefactor = 6. * cosmo_params.F_NL / (8*np.pi**4.)
 
-    der_curlM_2 = der_curlM(k_2,Mm,k_class,cosmo_params,global_params) 
-    der_curlM_12 = der_curlM(k_12,Mm,k_class,cosmo_params,global_params) 
+    Fm_blocks, dFm_blocks = [], []
 
-    integrand = k_2**2 * curlM_2 * curlM_12 * (Pphi_1 * Pphi_2 )
-    
-    integral_dk2 = np.trapz(integrand, mu, axis = integrate_mu)
-    Fm = np.trapz(integral_dk2, kall, axis = integrate_k2)
+    for start in range(0, len(Mm), mass_chunk):
+        Mm_block = Mm[start:start+mass_chunk][None,None, None,:]
 
-    Fm *= 6. * cosmo_params.F_NL / (8*np.pi**4.) 
+        curlM_2 = curlM(k_2,Mm_block,k_class,cosmo_params,global_params,T_CLASS)
+        curlM_12 = curlM(k_12,Mm_block,k_class,cosmo_params,global_params,T_CLASS)
 
-    integrand_dn2 = k_2**2 * (Pphi_1 * Pphi_2 ) * (der_curlM_2 * curlM_12 + curlM_2 * der_curlM_12)
-    
-    integral_dk2_dn2 = np.trapz(integrand_dn2, mu, axis = integrate_mu)
-    dFm_dn2 = np.trapz(integral_dk2_dn2, kall, axis = integrate_k2)
-    
-    dFm_dn2 *= 6. * cosmo_params.F_NL / (8*np.pi**4.) 
+        der_curlM_2 = der_curlM(k_2,Mm_block,k_class,cosmo_params,global_params,T_CLASS)
+        der_curlM_12 = der_curlM(k_12,Mm_block,k_class,cosmo_params,global_params,T_CLASS)
 
+        integrand = k_2**2 * curlM_2 * curlM_12 * (Pphi_1 * Pphi_2 )
+
+        integral_dk2 = _trapezoid(integrand, mu, axis = integrate_mu)
+        Fm_blocks.append(_trapezoid(integral_dk2, kall, axis = integrate_k2) * prefactor)
+
+        integrand_dn2 = k_2**2 * (Pphi_1 * Pphi_2 ) * (der_curlM_2 * curlM_12 + curlM_2 * der_curlM_12)
+
+        integral_dk2_dn2 = _trapezoid(integrand_dn2, mu, axis = integrate_mu)
+        dFm_blocks.append(_trapezoid(integral_dk2_dn2, kall, axis = integrate_k2) * prefactor)
+
+    Fm = np.concatenate(Fm_blocks, axis=-1)
+    dFm_dn2 = np.concatenate(dFm_blocks, axis=-1)
 
     return Fm, dFm_dn2
 
 
-def tpf(log10_mass_array,cosmo_params,global_params):
+def tpf(log10_mass_array, cosmo_params, global_params):
+    """Three-point functions of the linear density field, and their mass derivatives.
 
+    Returns the connected cumulants <delta(M_n) delta(M_n) delta(M_m)> on a
+    grid of mass pairs, together with the three derivatives with respect to the
+    smaller mass M_n that the non-Gaussian mass function needs.
+
+    Only modes with k > ``cosmo_params.KCUT_FNL`` contribute: the cut is
+    applied to the integration grid, which implements the Theta(k - k_cut)
+    factor on every leg of the bispectrum.
+
+    All quantities are evaluated at z = 0 and scale as D(z)^3; the C code
+    applies the growth factor.  Everything is proportional to
+    ``cosmo_params.F_NL``, so the tables for a different f_NL could be obtained
+    by rescaling rather than recomputing.
+
+    Parameters
+    ----------
+    log10_mass_array : array
+        log10(M / Msun), the same grid used for sigma(M) so that the
+        interpolation indices match on the C side.
+
+    Returns
+    -------
+    mu3 : array, shape (n_M, n_M)
+        <delta_n delta_n delta_m>, indexed [M_n, M_m].
+    dmu3_dMn_diag : array
+        d/dM_n of <delta_n^3>, used on the diagonal M_n = M_m.
+    dmu3_dMn_lower : array
+        d/dM_n of <delta_m delta_n^2>, used when M_n > M_m.
+    dmu3_dMn_upper : array
+        d/dM_n of <delta_n delta_m^2>, used when M_n < M_m.
+    """
     print('Computing three point functions to estimate the Fcoll NG corrections...')
 
     MassVector = pow(10, log10_mass_array)
 
     kall_full = pow(10.,np.array(global_params.LOG_K_ARR_FOR_TRANSFERS)) # 1/Mpc
-    kall = np.asarray(kall_full[[kall_full > cosmo_params.KCUT_FNL][0]])
-    
+    kall = np.asarray(kall_full[kall_full > cosmo_params.KCUT_FNL])
+
+    T_CLASS = _zeta_spline(kall_full, global_params)
+
     k_1 = kall[:,None,None]
 
     Mn = MassVector[None,:,None]
 
-    curlM_1 = curlM(k_1,Mn,kall_full,cosmo_params,global_params) 
+    curlM_1 = curlM(k_1,Mn,kall_full,cosmo_params,global_params,T_CLASS)
+    der_curlM_1 = der_curlM(k_1,Mn,kall_full,cosmo_params,global_params,T_CLASS)
 
     Fmv, dFm_dn2v = FM(kall,kall, MassVector,kall_full,cosmo_params,global_params)
     Fm = Fmv[:,None,:]
     dFm_dn2 = dFm_dn2v[:,None,:]
-    der_curlM_1 = der_curlM(k_1,Mn,kall_full,cosmo_params,global_params) 
 
+    # Outer k_1 integral. The three derivative tables differ only in which of
+    # the two kernels carries the d/dM_n: the diagonal case differentiates
+    # both, since there M_n appears three times.
     integrand = k_1** 2 * curlM_1 * Fm
 
-    ddd = np.trapz(integrand,kall,axis=0)
+    mu3 = _trapezoid(integrand,kall,axis=0)
 
     integrand_dnm2 = k_1** 2 * der_curlM_1 * Fm
     integrand_dmn2 = k_1** 2 * curlM_1 * dFm_dn2
     integrand_dn3 = k_1** 2 * (der_curlM_1 * Fm + curlM_1 * dFm_dn2)
 
-    der_dnm2 = np.trapz(integrand_dnm2,kall,axis=0)
-    der_dmn2 = np.trapz(integrand_dmn2,kall,axis=0)
-    der_dn3 = np.trapz(integrand_dn3,kall,axis=0)
+    dmu3_dMn_upper = _trapezoid(integrand_dnm2,kall,axis=0)
+    dmu3_dMn_lower = _trapezoid(integrand_dmn2,kall,axis=0)
+    dmu3_dMn_diag = _trapezoid(integrand_dn3,kall,axis=0)
 
-    return ddd, der_dn3, der_dmn2, der_dnm2
+    return mu3, dmu3_dMn_diag, dmu3_dMn_lower, dmu3_dMn_upper

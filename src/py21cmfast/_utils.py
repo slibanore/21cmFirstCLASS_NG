@@ -167,54 +167,43 @@ class MemoryAllocError(FatalCError):
 
     default_message = """An error has occured while attempting to allocate memory! (check the LOG for more info)"""
 
-# -----------------------------------------------------------------------------
-# INSERTION 1 of 3
-# After line 168 (the MemoryAllocError class, last existing exception class).
-# Add the new CGFApproximationError class immediately below it.
-# -----------------------------------------------------------------------------
- 
-# --- existing line 165-168 (context, do not repeat) ---
-# class MemoryAllocError(FatalCError):
-#     """An exception when unable to allocated memory."""
-#
-#     default_message = """An error has occured while attempting to allocate memory! (check the LOG for more info)"""
- 
- 
-# SarahLibanore: exception for CGF saddlepoint approximation breakdown
 class CGFApproximationError(ParameterError):
-    """An exception when the CGF skewness-only saddlepoint approximation breaks down.
- 
-    This is raised when either of the two hard failure conditions is met
-    inside the non-Gaussian collapsed fraction / HMF calculation:
- 
-      1. D = S^2 + 2*mu3*delta_c <= 0
-         The discriminant of the saddlepoint quadratic is non-positive,
-         meaning no real saddlepoint exists at the collapse barrier.
-         This happens for sufficiently negative f_NL and signals that
-         the neglected trispectrum kappa_4 ~ f_NL^2 is not small.
- 
-      2. Exponent E = K(t*) - t*·delta_c + delta_c^2/(2S) > 700
-         The ratio of the saddlepoint PDF to the Gaussian PDF at the
-         barrier would overflow double precision. This signals that the
-         skewness-only truncation is predicting an exponentially enhanced
-         tail, again indicating that higher cumulants are essential.
- 
-    In both cases the skewness-only CGF approximation has broken down.
-    The correct fix is to include kappa_4 (the connected trispectrum).
-    As a workaround, reduce |F_NL| until the error no longer fires.
- 
-    Check the LOG for full diagnostics: the failing values of M, z,
-    F_NL, sigma, mu3, delta_c, and the critical |F_NL| threshold at
-    which D = 0 for those parameters are all printed before the throw.
+    """Raised when the skewness-only saddlepoint approximation breaks down.
+
+    The non-Gaussian halo mass function offers two evaluation schemes
+    (see ``UserParams.USE_EDG_uncond_hmf``).  The saddlepoint scheme
+    truncates the cumulant generating function at the skewness, and that
+    truncation fails in two regimes:
+
+    1. ``D = S^2 + 2 * mu3 * delta_c <= 0``.  The saddlepoint quadratic has
+       no real root, so the cubic CGF cannot reach the collapse barrier
+       along the real axis.  Happens for sufficiently negative ``F_NL``.
+
+    2. ``exponent = K(t*) - t* * delta_c + delta_c^2 / (2 S) > 700``, which
+       would overflow a double.  The truncation is predicting an
+       exponentially enhanced tail.
+
+    Both indicate that the neglected trispectrum, of order ``F_NL^2``, is
+    no longer small.  The remedies are to reduce ``|F_NL|``, switch to the
+    Edgeworth scheme, or extend the expansion to kappa_4.
+
+    Notes
+    -----
+    The C code currently *warns* in these regimes and falls back to the
+    Gaussian mass function rather than raising.  This exception and its
+    exit code are kept wired through so that the fallback can be promoted
+    to a hard stop without touching the Python/C interface: see the
+    ``CGF_WARN_BREAKDOWN`` macro in ``src/ps.c``.
     """
- 
+
     default_message = (
-        "The CGF skewness-only saddlepoint approximation has broken down "
-        "(D <= 0 or exponent overflow). "
-        "The neglected trispectrum O(f_NL^2) is not small at these parameters. "
-        "Reduce |F_NL| or implement the kappa_4 correction. "
-        "(check the LOG for M, z, sigma, mu3, delta_c diagnostics)"
+        "The skewness-only saddlepoint approximation has broken down "
+        "(D <= 0 or exponent overflow). The neglected trispectrum, of order "
+        "F_NL^2, is not small at these parameters. Reduce |F_NL|, use the "
+        "Edgeworth scheme (USE_EDG_uncond_hmf=True), or add the kappa_4 term. "
+        "Check the log for the M, z, sigma, mu3 and delta_c diagnostics."
     )
+
 
 SUCCESS = 0
 IOERROR = 1
@@ -226,14 +215,14 @@ TABLEEVALUATIONERROR = 6
 INFINITYORNANERROR = 7
 MASSDEPZETAERROR = 8
 MEMORYALLOCERROR = 9
-# SarahLibanore: CGF saddlepoint breakdown (must match #define CGFError 10 in exceptions.h)
+# Must match "#define CGFError 10" in src/exceptions.h.
 CGFERROR = 10
 
 
 def _process_exitcode(exitcode, fnc, args):
     """Determine what happens for different values of the (integer) exit code from a C function."""
     if exitcode != SUCCESS:
-        logger.error(f"In function: {fnc.__name__}.  =")#Arguments: {args}")
+        logger.error(f"In function: {fnc.__name__}.  Arguments: {args}")
 
         if exitcode:
             try:
@@ -246,8 +235,7 @@ def _process_exitcode(exitcode, fnc, args):
                     TABLEEVALUATIONERROR: TableEvaluationError,
                     MASSDEPZETAERROR: MassDepZetaError,
                     MEMORYALLOCERROR: MemoryAllocError,
-                    # SarahLibanore: CGF saddlepoint breakdown
-                    CGFERROR:             CGFApproximationError,
+                    CGFERROR: CGFApproximationError,
                 }[exitcode]
             except KeyError:  # pragma: no cover
                 raise FatalCError(

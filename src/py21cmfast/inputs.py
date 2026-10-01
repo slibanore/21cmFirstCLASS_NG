@@ -37,10 +37,6 @@ Planck18 = Planck15.clone(
     H0=67.66,
 )
 
-print('-----------------------------------------------------')
-print('SarahLibanore: developed f_nl in IC and fcoll, fixed on 08/04/2026')
-print('-----------------------------------------------------')
-
 class GlobalParams(StructInstanceWrapper):
     """
     Global parameters for 21cmFAST.
@@ -574,7 +570,10 @@ global_params.T_VCB_KIN_TRANSFER = [0.00000000e+00, 3.11899486e-10, 5.02290006e-
                                     1.66884536e-03, 1.35979390e-03, 1.10760161e-03, 9.02059531e-04,
                                     7.34706853e-04, 5.98633907e-04, 4.88111761e-04, 3.98385369e-04,
                                     3.25460580e-04]
-global_params.T_ZETA_TRANSFER = list(np.zeros(len(global_params.T_M0_TRANSFER))) # SarahLibanore, fnl
+# Transfer function from the primordial curvature perturbation zeta to the
+# z=0 matter density, used to build the primordial potential box and the
+# three-point functions below. Filled by generate_ICs.run_ICs() from CLASS.
+global_params.T_ZETA_TRANSFER = list(np.zeros(len(global_params.T_M0_TRANSFER)))
 global_params.T_V_CHI_B_ZHIGH_TRANSFER = list(np.zeros(149))
 global_params.LOG_K_ARR_FOR_SDGF = list(np.zeros(300))
 global_params.LOG_SDGF_BARYONS = list(np.zeros(70*300))
@@ -583,11 +582,21 @@ global_params.LOG_SDGF_SDM = list(np.zeros(70*300))
 global_params.LOG_M_ARR = list(np.zeros(300))
 global_params.Z_ARRAY_FOR_SIGMA = list(np.zeros(101))
 global_params.SIGMA_MZ = list(np.zeros(300*101))
-# SarahLibanore: three point function and derivative to add NG corrections to Fcoll
-global_params.THREEPOINT_MnMm = list(np.zeros(300*300))# SarahLibanore, fnl
-global_params.THREEPOINT_DER_Mn3 = list(np.zeros(300*300))# SarahLibanore, fnl
-global_params.THREEPOINT_DER_MnMm2 = list(np.zeros(300*300))# SarahLibanore, fnl
-global_params.THREEPOINT_DER_MmMn2 = list(np.zeros(300*300))# SarahLibanore, fnl
+# Smoothed three-point functions of the linear density field at z=0, and
+# their derivatives with respect to the smaller mass. These are the
+# mu_3 terms entering the non-Gaussian collapsed fraction. Each is a flattened
+# 300 x 300 grid over (M_n, M_m) matching LOG_M_ARR, filled by
+# generate_ICs.run_ICs() only when a NON_GAUSS_FCOLL_* flag is on.
+# Index convention: entry [M_m + 300 * M_n]; see three_point_interpolations()
+# in src/ps.c.
+#   THREEPOINT_MnMm       <delta(M_n) delta(M_n) delta(M_m)>
+#   THREEPOINT_DER_Mn3    d/dM_n of <delta(M_n)^3>          (diagonal, M_n = M_m)
+#   THREEPOINT_DER_MnMm2  d/dM_n of <delta(M_n) delta(M_m)^2>   (M_n < M_m)
+#   THREEPOINT_DER_MmMn2  d/dM_n of <delta(M_m) delta(M_n)^2>   (M_n > M_m)
+global_params.THREEPOINT_MnMm = list(np.zeros(300*300))
+global_params.THREEPOINT_DER_Mn3 = list(np.zeros(300*300))
+global_params.THREEPOINT_DER_MnMm2 = list(np.zeros(300*300))
+global_params.THREEPOINT_DER_MmMn2 = list(np.zeros(300*300))
 
 class CosmoParams(StructWithDefaults):
     """
@@ -631,7 +640,21 @@ class CosmoParams(StructWithDefaults):
         The power-law index of the cross-section between the SDM particle and its target particles,
         see SDM_TARGET_TYPE in user_params.
     F_NL : float, optional
-        fNL for local non Gaussianity
+        Amplitude of local-type primordial non-Gaussianity, in the CMB
+        convention: zeta = zeta_G + (3/5) * F_NL * (zeta_G^2 - <zeta_G^2>),
+        equivalently Phi = Phi_G + F_NL * (Phi_G^2 - <Phi_G^2>) with
+        Phi = (3/5) zeta the primordial Bardeen potential.  This is the same
+        convention as Planck 2018 IX (arXiv:1905.05697), so the value is
+        directly comparable to published CMB constraints.  Default 0
+        reproduces the Gaussian code exactly.
+    KCUT_FNL : float, optional
+        Lower wavenumber cut-off k_cut, in 1/Mpc, applied to every leg of the
+        primordial bispectrum (the Theta(k - k_cut) factor in Eq. 14 of
+        arXiv:2009.01245).  Modes below it stay Gaussian, which lets you
+        restrict the non-Gaussianity to small scales that CMB bispectrum
+        measurements do not constrain.  The default 1e-3 is below the box
+        fundamental mode for any practical BOX_LEN, so it is effectively
+        scale-independent non-Gaussianity.
     """
 
     _ffi = ffi
@@ -650,8 +673,10 @@ class CosmoParams(StructWithDefaults):
         "f_chi": 0., # JordanFlitter: added SDM fraction (this is actually -log10(f_chi))
         "sigma_SDM": 41., # JordanFlitter: added SDM cross section prefactor (this is actually -log10(sigma/cm^2))
         "SDM_INDEX": -4., # JordanFlitter: added SDM cross section index
-        "F_NL":0, # SarahLibanore: local non gaussianity
-        "KCUT_FNL": 1e-3 # SarahLibanore: minimum scale where non Gaussianity kicks in (2009.01245) , 1e-3 to for scale independent 
+        # Local primordial non-Gaussianity. F_NL = 0 recovers the Gaussian code.
+        "F_NL": 0.,
+        # Small-scale cut-off k_cut [1/Mpc] on the bispectrum; see docstring.
+        "KCUT_FNL": 1e-3,
     }
 
     @property
@@ -846,7 +871,73 @@ class UserParams(StructWithDefaults):
         Whether to use Bradley Greig's "cloud in cell" algorithm in 2LPT calculations. If set to True, mass will be redistributed to
         its 8 nearest neighbors during the 2LPT calculations. Otherwise, there will be no such redistribution. Default is True.
     NON_GAUSS_IC : bool, optional
-        If True, initial conditions are drawn using the potential and introducing non Gaussian corrections
+        If True, the initial density field is generated from a non-Gaussian
+        primordial potential rather than directly from the matter power
+        spectrum.  A Gaussian potential box is drawn in Fourier space,
+        transformed to real space, squared locally following
+        Phi = Phi_G + F_NL * (Phi_G^2 - <Phi_G^2>), and only then multiplied by
+        the transfer function.  That ordering matters: squaring does not
+        commute with a scale-dependent transfer function, so the local ansatz
+        must be applied to the primordial field.  Default False.
+    EXTRA_DIM_FNL : float, optional
+        Zero-padding factor for the grid used when squaring the potential in
+        real space.  Squaring a field band-limited at k_Nyquist produces power
+        up to 2 k_Nyquist, which aliases back onto the grid.  Padding the box
+        by 3/2 (the Orszag rule) removes that aliasing.  Only used when
+        NON_GAUSS_IC is True; memory scales as EXTRA_DIM_FNL^3, so 1.5 costs
+        about 3.4x the DIM-sized box.  Set to 1.0 to disable de-aliasing.
+        Default 1.5.
+    NON_GAUSS_FCOLL_COND : bool, optional
+        If True, apply the non-Gaussian correction to the *conditional* halo
+        mass function (dNdM_conditional, used inside the excursion-set
+        calculation of the collapsed fraction in each cell).  The scheme is
+        selected by USE_LD_cond_hmf.  Default False.
+    NON_GAUSS_FCOLL_UNCOND : bool, optional
+        If True, apply the non-Gaussian correction to the *unconditional* halo
+        mass function (dNion_General, the global ionizing-emissivity integral).
+        The scheme is selected by USE_EDG_uncond_hmf.  Default False.
+    NG_MODEL_APPROX : bool, optional
+        Only used when NON_GAUSS_FCOLL_COND is True.  If True, use the
+        high-barrier approximation of Lidz et al. (arXiv:1304.8049), valid for
+        delta_c^2 >> S_m and delta_c >> delta_m.  If False, use the full
+        expression of D'Aloisio et al. (arXiv:1206.3305), which is more
+        accurate but costs two extra exponentials per evaluation.
+        Default True.
+    USE_LD_cond_hmf : bool, optional
+        Only used when NON_GAUSS_FCOLL_COND is True.  If True, use the
+        Lidz/D'Aloisio conditional first-crossing rate.  If False, use the
+        saddlepoint approximation to the cumulant generating function.
+        Default True.
+    USE_EDG_uncond_hmf : bool, optional
+        Only used when NON_GAUSS_FCOLL_UNCOND is True.  If True, use the
+        Edgeworth expansion of Sabti, Munoz & Blas (arXiv:2009.01245,
+        Eqs. 38-40), carried to third order in the skewness.  If False, use
+        the saddlepoint approximation to the cumulant generating function
+        truncated at the skewness.  The two agree at small |F_NL| and diverge
+        where the expansion breaks down, so the difference between them is a
+        useful estimate of the modelling systematic.  Default True.
+    FORCE_MMAX : float, optional
+        If non-zero, log10 of an upper mass limit (in solar masses) imposed on
+        the halo mass integrals, replacing global_params.M_MAX_INTEGRAL.  The
+        non-Gaussian correction grows steeply with nu, so at high redshift the
+        integrand can be dominated by masses far above any physically occupied
+        halo.  Capping the integral keeps the result finite and testable.
+        Default 0, meaning no override.
+    MAX_EPSILON_NG : float, optional
+        Divergence guard for the saddlepoint scheme, ignored when the
+        Edgeworth scheme is selected.  If positive, the correction is reset to
+        the Gaussian value wherever |kappa_3 H_3(nu) / 6| exceeds this value,
+        i.e. wherever the leading correction is no longer a small perturbation.
+        If exactly 0, a different guard is used: where the third-order term
+        exceeds the second, the correction is capped at
+        exp(delta_c^2 / 4S) / sqrt(2).  Default 0.
+    WRITE_CGF_DIAG : bool, optional
+        Debugging aid, off by default.  If True, every evaluation of the
+        non-Gaussian correction appends a binary record to
+        ``<cwd>/files/``, one file per OpenMP thread.  The directory must
+        already exist or the records are silently dropped.  This writes a
+        very large amount of data and slows the run substantially; use it only
+        on small test boxes.  Default False.
 
     """
 
@@ -856,7 +947,7 @@ class UserParams(StructWithDefaults):
         "BOX_LEN": 300.0,
         "DIM": None,
         "HII_DIM": 200,
-        "EXTRA_DIM_FNL": 1.5, # SarahLibanore: introduced for NG
+        "EXTRA_DIM_FNL": 1.5, # de-aliasing pad for the NG potential box (Orszag 3/2 rule)
         "USE_FFTW_WISDOM": False,
         "HMF": 1,
         "USE_RELATIVE_VELOCITIES": True, # JordanFlitter: changed default to True
@@ -892,15 +983,24 @@ class UserParams(StructWithDefaults):
         "EVOLVE_MATTER": True, # JordanFlitter: added flag to properly evolve the CDM density field (and the total matter field)
         "LINEAR_DELTA_IN_EPS": True, # JordanFlitter: added flag to use delta_m from linear theory in the EPS formalism
 
-        "NON_GAUSS_IC": False, # SarahLibanore: flag to use fNL in initial conditions
-        "NON_GAUSS_FCOLL_COND": False, # SarahLibanore: flag to use fNL in collapsed fraction
-        "NON_GAUSS_FCOLL_UNCOND": False, # SarahLibanore: flag to use fNL in collapsed fraction
-        "NG_MODEL_APPROX":True, # SarahLibanore: if True use Lidz approx (1304.8049), otherwise D'Alosio (1206.3305)
-        "FORCE_MMAX": 0., # SarahLibanore: high mass cut in the intrgrals, to prevent inf in the fnl case
-        "WRITE_CGF_DIAG": False, # SarahLibanore: flag for debugging fnl case
-        "MAX_EPSILON_NG": 0., # SarahLibanore: cap fnl correction when III order > II order
-        "USE_LD_cond_hmf": True, # SarahLibanore: in dNdm_conditional, if True use Lidz implementation (1304.8049), otherwise saddlepoint 
-        "USE_EDG_uncond_hmf": True, # SarahLibanore: in dNion_General, if True use Edgeworth implementation (2009.01245), otherwise saddlepoint
+        # --- Local primordial non-Gaussianity -------------------------------
+        # All default to the Gaussian behaviour. See the class docstring for
+        # the full description of each flag.
+        #
+        # Where the non-Gaussianity is applied:
+        "NON_GAUSS_IC": False,            # non-Gaussian initial density field
+        "NON_GAUSS_FCOLL_COND": False,    # conditional HMF (dNdM_conditional)
+        "NON_GAUSS_FCOLL_UNCOND": False,  # unconditional HMF (dNion_General)
+        #
+        # Which approximation to use where it is applied:
+        "USE_LD_cond_hmf": True,     # conditional:   Lidz/D'Aloisio vs saddlepoint
+        "NG_MODEL_APPROX": True,     #   if Lidz/D'Aloisio: 1304.8049 vs 1206.3305
+        "USE_EDG_uncond_hmf": True,  # unconditional: Edgeworth vs saddlepoint
+        #
+        # Numerical controls:
+        "FORCE_MMAX": 0.,       # log10(M_max/Msun) cap on the mass integrals; 0 = off
+        "MAX_EPSILON_NG": 0.,   # saddlepoint divergence guard
+        "WRITE_CGF_DIAG": False,  # dump per-evaluation diagnostics (slow, debugging only)
     }
 
     _hmf_models = ["PS", "ST", "WATSON", "WATSON-Z"]
