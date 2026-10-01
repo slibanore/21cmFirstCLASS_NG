@@ -86,6 +86,11 @@ interpolated onto the lightcone cells):
 """
 import logging
 import numpy as np
+
+# NumPy 2.0 renamed np.trapz to np.trapezoid and removed the old name.
+# Bind whichever exists so this module works on both NumPy 1.x and 2.x.
+_trapezoid = getattr(np, "trapezoid", None) or np.trapz
+
 import os
 import warnings
 from astropy import units
@@ -3188,11 +3193,12 @@ def run_lightcone(
                 CLASS_params['background_verbose'] = 0
             if user_params.SCATTERING_DM:
                 # Set SDM parameters
+                CLASS_params['N_dmeff'] = 1 # number of SDM species
                 CLASS_params['Omega_cdm'] = (1.-pow(10.,-cosmo_params.f_chi))*(cosmo_params.OMm-cosmo_params.OMb)
                 CLASS_params['Omega_dmeff'] = pow(10.,-cosmo_params.f_chi)*(cosmo_params.OMm-cosmo_params.OMb) # ratio of SDM to total DM
                 CLASS_params['m_dmeff'] = pow(10.,cosmo_params.m_chi)*1.e-9 # in GeV
                 CLASS_params['sigma_dmeff'] = pow(10.,-cosmo_params.sigma_SDM) # cross section prefactor in cm^2
-                CLASS_params['npow_dmeff'] = -4 # power-law of the cross section dependence on the relative velocity
+                CLASS_params['npow_dmeff'] = cosmo_params.SDM_INDEX # power-law of the cross section dependence on the relative velocity
                 # Type of the interacting particles with the SDM (can be 'baryons', 'ionized', 'hydrogen', 'protons' or 'electrons')
                 if user_params.SDM_TARGET_TYPE == 1:
                     CLASS_params['dmeff_target'] = 'baryons'
@@ -4098,11 +4104,12 @@ def run_lightcone(
                     CLASS_params['background_verbose'] = 0
                 if user_params.SCATTERING_DM:
                     # Set SDM parameters
+                    CLASS_params['N_dmeff'] = 1 # number of SDM species
                     CLASS_params['Omega_cdm'] = (1.-pow(10.,-cosmo_params.f_chi))*(cosmo_params.OMm-cosmo_params.OMb)
                     CLASS_params['Omega_dmeff'] = pow(10.,-cosmo_params.f_chi)*(cosmo_params.OMm-cosmo_params.OMb) # ratio of SDM to total DM
                     CLASS_params['m_dmeff'] = pow(10.,cosmo_params.m_chi)*1.e-9 # in GeV
                     CLASS_params['sigma_dmeff'] = pow(10.,-cosmo_params.sigma_SDM) # cross section prefactor in cm^2
-                    CLASS_params['npow_dmeff'] = -4 # power-law of the cross section dependence on the relative velocity
+                    CLASS_params['npow_dmeff'] = cosmo_params.SDM_INDEX # power-law of the cross section dependence on the relative velocity
                     # Type of the interacting particles with the SDM (can be 'baryons', 'ionized', 'hydrogen', 'protons' or 'electrons')
                     if user_params.SDM_TARGET_TYPE == 1:
                         CLASS_params['dmeff_target'] = 'baryons'
@@ -4182,10 +4189,10 @@ def compute_tau_reio(z_array, density_box, xH_box, cosmo_params):
     H_0 = 1e5*h/Mpc_to_meter # Hubble constant in 1/sec
     mu = 1./(1. - Y_He*(1.-1./_not4_))
     integrand = (1. + z_array)**2 / np.sqrt(Omega_Lambda + Omega_m0*(1. + z_array)**3) * np.mean(np.mean((1.+density_box)*(1.-xH_box),0),0)
-    integral = np.trapz(x = z_array[z_array <= global_params.Z_HEAT_MAX], y = integrand[z_array <= global_params.Z_HEAT_MAX])
+    integral = _trapezoid(x = z_array[z_array <= global_params.Z_HEAT_MAX], y = integrand[z_array <= global_params.Z_HEAT_MAX])
     z_low_array = np.linspace(0,min(z_array),100)
     integrand_low = (1. + z_low_array)**2 / np.sqrt(Omega_Lambda + Omega_m0*(1. + z_low_array)**3)
-    integral += np.trapz(x = z_low_array, y = integrand_low)
+    integral += _trapezoid(x = z_low_array, y = integrand_low)
     tau_reio = 3.*H_0*Omega_b0*sigma_T*c / (8.*np.pi*G*m_p*mu)*integral # (m^3/sec^2)/(N*m^2/kg) = (kg*m/sec^2)/N = dimensionless!
     return tau_reio
 
