@@ -1,26 +1,17 @@
 .gitignore
-BMF.ipynb
-DEFFCOL.ipynb
 LICENSE
 PKG-INFO
 README.md
 build_cffi.py
-checks_FNL.ipynb
-checks_FNL_karin.ipynb
-debugFNL.ipynb
 notebook_4_SKA.ipynb
-runsims_FNL.py
 setup.py
 Tutorial (Jupyter notebooks)/notebook_1.ipynb
 Tutorial (Jupyter notebooks)/notebook_2.ipynb
 Tutorial (Jupyter notebooks)/notebook_3.ipynb
 Tutorial (Jupyter notebooks)/notebook_4.ipynb
-__pycache__/finaltest_FNL.cpython-310.pyc
-__pycache__/runsims_FNL.cpython-310.pyc
-images/coeval_boxes.png
-images/densities.png
-images/lightcone_boxes.png
-images/power_spectrum.png
+Tutorial fNL/notebook_fNL_collapse_fraction.ipynb
+Tutorial fNL/notebook_fNL_simulations.ipynb
+Tutorial fNL/runsims_FNL.py
 src/21cmFAST.egg-info/PKG-INFO
 src/21cmFAST.egg-info/SOURCES.txt
 src/21cmFAST.egg-info/dependency_links.txt
@@ -37,7 +28,6 @@ src/py21cmfast/cli.py
 src/py21cmfast/experiment.py
 src/py21cmfast/generate_ICs.py
 src/py21cmfast/inputs.py
-src/py21cmfast/inputs_WORKING.py
 src/py21cmfast/outputs.py
 src/py21cmfast/plotting.py
 src/py21cmfast/power_spectrum.py

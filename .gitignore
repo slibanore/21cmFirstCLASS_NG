@@ -13,3 +13,4 @@ watershed*
 *.pkl
 .gitignore
 notebook_4_SKA.ipynb
+*__pycache__*
